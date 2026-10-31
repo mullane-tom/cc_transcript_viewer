@@ -24,6 +24,8 @@ CHROME_CANDIDATES = (
     shutil.which("google-chrome"),
     shutil.which("chromium"),
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 )
 CHROME = next((path for path in CHROME_CANDIDATES if path and Path(path).is_file()), None)
 
