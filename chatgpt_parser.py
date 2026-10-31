@@ -208,8 +208,7 @@ def _reference_links(ref: dict) -> str:
     links = []
     for item in ref.get("items") or []:
         if isinstance(item, dict) and item.get("url"):
-            title = (item.get("title") or item.get("attribution") or item["url"]).replace("]", "")
-            links.append(f"[{title}]({item['url']})")
+            links.append(_link(item))
     return " (" + "; ".join(links) + ")" if links else ""
 
 
@@ -234,18 +233,64 @@ def _marker_text(body: str) -> str:
     return ""  # cite, filecite, navlist, image_group, map, … carry no readable text
 
 
+def _clean_url(url: str) -> str:
+    """Drop the `utm_source=chatgpt.com` ChatGPT appends to every cited link."""
+    url = re.sub(r"([?&])utm_source=chatgpt\.com(&|$)", lambda m: m.group(1) if m.group(2) else "", url)
+    return url.rstrip("?&")
+
+
+def _citation_index(references) -> dict[str, dict]:
+    """Citation key ('turn0search3') -> cited item, from each item's `refs`.
+
+    Newer exports leave every reference's `matched_text` empty, so this is the
+    only reliable way back from an inline cite marker to the page it names.
+    (The references are *not* in marker order, so position can't be used.)
+    """
+    index: dict[str, dict] = {}
+    for ref in references or []:
+        if not isinstance(ref, dict):
+            continue
+        for item in ref.get("items") or []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            for r in item.get("refs") or []:
+                if isinstance(r, dict) and r.get("ref_type") is not None:
+                    key = f"turn{r.get('turn_index')}{r.get('ref_type')}{r.get('ref_index')}"
+                    index.setdefault(key, item)
+    return index
+
+
+def _link(item: dict) -> str:
+    url = _clean_url(item["url"])
+    title = (item.get("title") or item.get("attribution") or url).replace("]", "").replace("\n", " ")
+    return f"[{title}]({url})"
+
+
 def clean_text(text: str, references=None) -> str:
     """Replace ChatGPT's inline citation/entity markers with readable Markdown."""
-    if not text or ("" not in text and "【" not in text):
+    # Any marker character, not just U+E200: attribution highlights wrap a
+    # span in U+E203\u2026U+E204 (+ U+E206) with no opening U+E200 at all.
+    if not text or (not _STRAY_PUA_RE.search(text) and "\u3010" not in text):
         return text
     by_marker = {}
     for ref in references or []:
-        if isinstance(ref, dict) and isinstance(ref.get("matched_text"), str):
+        if isinstance(ref, dict) and ref.get("matched_text"):
             by_marker.setdefault(ref["matched_text"], ref)
+    by_key = _citation_index(references)
 
     def replace(match: re.Match) -> str:
         ref = by_marker.get(match.group(0))
         links = _reference_links(ref) if ref else ""
+        kind, *keys = match.group(1).split("\ue202")
+        if not links and kind in ("cite", "filecite"):
+            items = []
+            for key in keys:
+                item = by_key.get(key)
+                if item is not None and item not in items:
+                    items.append(item)
+            links = " (" + "; ".join(_link(i) for i in items) + ")" if items else ""
+        if links and match.start() and match.string[match.start() - 1].isspace():
+            links = links.lstrip()  # "text cite…" already has its space
         return links or _marker_text(match.group(1))
 
     def replace_old(match: re.Match) -> str:
@@ -347,6 +392,82 @@ def _message_blocks(message: dict) -> list[dict]:
     return blocks
 
 
+# Reference types that name the web pages a reply cites.
+_CITED_PAGE_TYPES = {"grouped_webpages", "grouped_webpages_model_predicted_fallback", "webpage", "webpage_extended"}
+
+
+def _sources_block(meta: dict) -> dict | None:
+    """A "Sources" text block: every page the reply cites, once each.
+
+    ChatGPT's own source list (`sources_footnote`) comes first, then any page
+    an inline citation names that the footnote missed — inline markers can't
+    always be resolved to a position, but the page they cite is never lost.
+    """
+    pages: list[dict] = []
+    seen: set[str] = set()
+
+    def add(item) -> None:
+        if not isinstance(item, dict) or not item.get("url"):
+            return
+        url = _clean_url(item["url"])
+        if url not in seen:
+            seen.add(url)
+            pages.append(item)
+
+    refs = [r for r in meta.get("content_references") or [] if isinstance(r, dict)]
+    for ref in refs:
+        if ref.get("type") == "sources_footnote":
+            for source in ref.get("sources") or []:
+                add(source)
+    for ref in refs:
+        if ref.get("type") in _CITED_PAGE_TYPES:
+            add(ref)
+            for item in ref.get("items") or []:
+                add(item)
+    if not pages:
+        return None
+    lines = []
+    for page in pages:
+        site = page.get("attribution") or ""
+        lines.append("- " + _link(page) + (f" · {site}" if site and site != page.get("title") else ""))
+    return {"type": "text", "text": "**Sources**\n\n" + "\n".join(lines)}
+
+
+def _search_block(meta: dict) -> dict | None:
+    """The pages a web lookup retrieved (`search_result_groups`), as a tool call.
+
+    The export keeps the results but not the query, so the input lists the
+    sites searched; the result lists each page as title, URL, and snippet.
+    """
+    groups = [g for g in meta.get("search_result_groups") or [] if isinstance(g, dict)]
+    entries, lines, seen = [], [], set()
+    for group in groups:
+        for entry in group.get("entries") or []:
+            if isinstance(entry, dict) and entry.get("url"):
+                url = _clean_url(entry["url"])
+                if url in seen:
+                    continue
+                seen.add(url)
+                entries.append(entry)
+                snippet = " ".join((entry.get("snippet") or "").split())
+                lines.append("\n".join(x for x in (
+                    entry.get("title") or url, url, snippet[:300] + ("…" if len(snippet) > 300 else ""),
+                ) if x))
+    if not entries:
+        return None
+    domains = []
+    for group in groups:
+        if group.get("domain") and group["domain"] not in domains:
+            domains.append(group["domain"])
+    return {
+        "type": "tool_use",
+        "name": "web_search",
+        "input": {"sites": domains},
+        "result": {"text": f"{len(entries)} page{'s' if len(entries) != 1 else ''} retrieved\n\n"
+                           + "\n\n".join(lines), "images": []},
+    }
+
+
 def _instructions_event(message: dict, ts) -> dict | None:
     content = message.get("content") or {}
     if content.get("content_type") == "user_editable_context":
@@ -408,7 +529,12 @@ class _EventBuilder:
             block = {"type": "tool_use", "name": recipient, "input": {key: text} if text else {}, "result": None}
             self._assistant(ts, meta.get("model_slug"))["blocks"].append(block)
         elif role == "assistant":
+            # Retrieval happens before the text that uses it; the cited
+            # sources follow the reply (only if there is one to cite from).
             blocks = _message_blocks(message)
+            search = _search_block(meta)
+            sources = _sources_block(meta) if any(b["type"] == "text" for b in blocks) else None
+            blocks = ([search] if search else []) + blocks + ([sources] if sources else [])
             if blocks:
                 self._assistant(ts, meta.get("model_slug"))["blocks"].extend(blocks)
         elif role == "tool":

@@ -719,11 +719,32 @@ def chatgpt_conversation(conv_id: str = "c0ffee00-0000-4000-8000-000000000001",
             "out", "tool", {"content_type": "execution_output", "text": "4"}, t0 + 64, author_name="python")),
         ("a1", "out", _chatgpt_message(
             "a1", "assistant", {"content_type": "text", "parts": [
-                "Use proxy DHCP citeturn0search0 and see "
-                "urlthe docshttps://netboot.xyz/docs."]},
-            t0 + 65, metadata={"model_slug": "gpt-5-thinking", "content_references": [
-                {"matched_text": "citeturn0search0", "type": "grouped_webpages",
-                 "items": [{"title": "dnsmasq man page", "url": "https://example.test/dnsmasq"}]}]})),
+                "Use proxy DHCP \ue200cite\ue202turn0search0\ue201 and see "
+                "\ue200url\ue202the docs\ue202https://netboot.xyz/docs\ue201. "
+                "Pin the image \ue200cite\ue202turn0search1\ue201. "
+                "\ue203Attributed span.\ue204\ue206"]},
+            t0 + 65, metadata={
+                "model_slug": "gpt-5-thinking",
+                # Older exports match a reference to its marker by matched_text;
+                # newer ones leave it empty and link through each item's refs.
+                "content_references": [
+                    {"matched_text": "\ue200cite\ue202turn0search0\ue201", "type": "grouped_webpages",
+                     "items": [{"title": "dnsmasq man page", "url": "https://example.test/dnsmasq"}]},
+                    {"matched_text": "", "type": "grouped_webpages", "items": [
+                        {"title": "iPXE images", "url": "https://example.test/ipxe?utm_source=chatgpt.com",
+                         "refs": [{"turn_index": 0, "ref_type": "search", "ref_index": 1}]}]},
+                    {"matched_text": "", "type": "hidden"},
+                    {"matched_text": "", "type": "sources_footnote", "sources": [
+                        {"title": "netboot.xyz docs", "url": "https://netboot.xyz/docs", "attribution": "netboot.xyz"}]},
+                ],
+                "search_result_groups": [
+                    {"domain": "example.test", "entries": [
+                        {"title": "dnsmasq man page", "url": "https://example.test/dnsmasq", "snippet": "proxy DHCP"},
+                        {"title": "iPXE images", "url": "https://example.test/ipxe", "snippet": "chainload"}]},
+                    {"domain": "netboot.xyz", "entries": [
+                        {"title": "netboot.xyz docs", "url": "https://netboot.xyz/docs", "snippet": "setup"}]},
+                ],
+            })),
         ("u2", "a1", _chatgpt_message(
             "u2", "user", {"content_type": "multimodal_text", "parts": [
                 {"content_type": "image_asset_pointer", "asset_pointer": "file-service://file-Abc123",

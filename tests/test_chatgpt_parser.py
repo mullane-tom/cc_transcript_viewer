@@ -80,7 +80,8 @@ class SummaryTests(ChatGPTParserTestCase):
         self.assertEqual(summary["file"], "chatgpt:" + CONV_ID)
         self.assertEqual(summary["model"], "gpt-5-thinking")
         # The abandoned first draft is not counted; the two live prompts are.
-        self.assertEqual((summary["n_user"], summary["n_tool"]), (2, 1))
+        # One python call and one web lookup, the lookup also counted as web.
+        self.assertEqual((summary["n_user"], summary["n_tool"], summary["n_web"]), (2, 2, 1))
         self.assertTrue(summary["first_ts"].startswith("2026-01-01T00:00:00"))
 
 
@@ -107,15 +108,39 @@ class ConversationTests(ChatGPTParserTestCase):
 
     def test_assistant_turn_merges_thoughts_tool_and_reply(self):
         turn = self.events[3]
-        self.assertEqual([b["type"] for b in turn["blocks"]], ["thinking", "tool_use", "text"])
-        thinking, tool, reply = turn["blocks"]
+        self.assertEqual([b["type"] for b in turn["blocks"]], ["thinking", "tool_use", "tool_use", "text", "text"])
+        thinking, tool, _search, reply, _sources = turn["blocks"]
         self.assertIn("**Planning**", thinking["text"])
         self.assertEqual((tool["name"], tool["input"], tool["result"]["text"]),
                          ("python", {"code": "print(2 + 2)"}, "4"))
         self.assertEqual(turn["model"], "gpt-5-thinking")
         self.assertIn("[dnsmasq man page](https://example.test/dnsmasq)", reply["text"])
         self.assertIn("[the docs](https://netboot.xyz/docs)", reply["text"])
-        self.assertNotRegex(reply["text"], "[-]")
+        self.assertNotRegex(reply["text"], "[\ue000-\uf8ff]")
+
+    def test_citation_resolved_through_item_refs(self):
+        # matched_text is empty, as in current exports; the marker key
+        # turn0search1 finds the item through its refs, tracking param dropped.
+        reply = self.events[3]["blocks"][3]["text"]
+        self.assertIn("Pin the image ([iPXE images](https://example.test/ipxe)).", reply)
+        self.assertIn("Attributed span.", reply)
+
+    def test_web_search_results_precede_the_reply(self):
+        search = self.events[3]["blocks"][2]
+        self.assertEqual((search["name"], search["input"]), ("web_search", {"sites": ["example.test", "netboot.xyz"]}))
+        result = search["result"]["text"]
+        self.assertTrue(result.startswith("3 pages retrieved"))
+        self.assertIn("iPXE images\nhttps://example.test/ipxe\nchainload", result)
+
+    def test_sources_list_follows_the_reply(self):
+        sources = self.events[3]["blocks"][4]["text"]
+        self.assertEqual(sources.splitlines(), [
+            "**Sources**",
+            "",
+            "- [netboot.xyz docs](https://netboot.xyz/docs) · netboot.xyz",
+            "- [dnsmasq man page](https://example.test/dnsmasq)",
+            "- [iPXE images](https://example.test/ipxe)",
+        ])
 
     def test_uploaded_image_is_inlined(self):
         image = self.events[4]["blocks"][0]
