@@ -287,6 +287,68 @@ def _agent_calls(parent_path: Path) -> list[dict]:
     return calls
 
 
+# Cache: sub-agent path -> (mtime, first user prompt)
+_SUBAGENT_PROMPT_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _subagent_opening_prompt(path: Path) -> str:
+    """A sub-agent transcript's first user prompt, read only as far as needed."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    key = str(path)
+    cached = _SUBAGENT_PROMPT_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    text = ""
+    for rec in _iter_records(path):
+        if rec.get("type") == "user":
+            text = " ".join(_user_record_text(rec).split())
+            if text:
+                break
+    _SUBAGENT_PROMPT_CACHE[key] = (mtime, text)
+    return text
+
+
+def _link_subagent_calls(path: Path, events: list[dict]) -> None:
+    """Point each Task/Agent call at the sub-agent transcript it spawned.
+
+    The inverse of _subagent_meta(): the same prompt-prefix match, run from the
+    parent's side, so the call can link through (``child_file``, as opencode's
+    ``task`` blocks do) and the outline graph can branch to it.
+    """
+    sub_dir = path.parent / path.stem / "subagents"
+    if not sub_dir.is_dir():
+        return
+    children = []
+    for child in sorted(sub_dir.glob("*.jsonl")):
+        prompt = _subagent_opening_prompt(child)
+        if prompt:
+            children.append((prompt[:300], str(child)))
+    if not children:
+        return
+    claimed: set[str] = set()
+
+    def walk(evs):
+        for ev in evs:
+            if ev.get("kind") == "branch":
+                for group in ev.get("groups") or []:
+                    walk(group)
+                continue
+            for b in ev.get("blocks") or []:
+                if b.get("type") != "tool_use" or b.get("name") not in ("Task", "Agent"):
+                    continue
+                prompt = " ".join(str((b.get("input") or {}).get("prompt") or "").split())[:300]
+                for child_prompt, child_file in children:
+                    if prompt and child_prompt == prompt and child_file not in claimed:
+                        b["child_file"] = child_file
+                        claimed.add(child_file)
+                        break
+
+    walk(events)
+
+
 def _subagent_meta(path: Path, records: list[dict]) -> dict | None:
     """Build the sub-agent fields (title, parent linkage) for one transcript.
 
@@ -1028,6 +1090,7 @@ def parse_session(path: Path) -> dict:
             continue
 
     events = _fold_branches(records, events, active_leaf)
+    _link_subagent_calls(path, events)
     # Pinned to the top, as Codex shows its base instructions.
     events[:0] = _system_prompt_events(records)
 

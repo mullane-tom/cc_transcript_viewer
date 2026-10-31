@@ -205,8 +205,9 @@ async function openLocalFileLink(event, anchor, target) {
 }
 
 // Session ids that name a database row rather than a transcript file on disk
-// (Cursor IDE/CLI and opencode) — nothing to reveal in Finder, nothing to stat.
-const SYNTHETIC_ID_RE = /^(cursordb|cursorcli|opencode):/;
+// (Cursor IDE/CLI, opencode, ChatGPT exports) — nothing to reveal in Finder,
+// nothing to stat.
+const SYNTHETIC_ID_RE = /^(cursordb|cursorcli|opencode|chatgpt):/;
 
 function hasTranscriptFile(file) {
   return typeof file === "string" && !!file && !SYNTHETIC_ID_RE.test(file);
@@ -309,6 +310,7 @@ function agentLabel(a) {
   if (a === "codex") return "Codex";
   if (a === "cursor") return "Cursor";
   if (a === "opencode") return "opencode";
+  if (a === "chatgpt") return "ChatGPT";
   return "Claude";
 }
 function shortPath(p) {
@@ -438,7 +440,7 @@ function modelFamily(m) {
   // ("openrouter/anthropic/claude-opus-4") land in the same family as bare ones.
   const s = String(m || "").toLowerCase().split("/").pop();
   if (s.startsWith("claude")) return "Claude";
-  if (s.startsWith("gpt") || s.includes("codex") || s.startsWith("o1") || s.startsWith("o3")) return "GPT";
+  if (s.startsWith("gpt") || s.includes("codex") || /^o[134](-|$)/.test(s) || s.startsWith("text-davinci")) return "GPT";
   return "Other";
 }
 
@@ -938,31 +940,45 @@ function filenameFromDisposition(header) {
   return m ? m[1] : "";
 }
 
+// Hand a Blob to the browser as a download named `name`.
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const anchor = el("a", { href: url, download: name });
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoked late: Safari cancels the download if the blob dies too early.
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
 // Download the open transcript as one self-contained HTML file: the viewer's
 // own UI with this session baked in, shareable without the server or the
 // original ~/.claude / ~/.codex / database it was read from.
-async function saveTranscriptHtml(e) {
+function saveTranscriptHtml(e) {
+  return saveTranscriptExport(e, "/api/export", "transcript.html");
+}
+
+// Download the open transcript as structured Markdown (export_markdown.py):
+// front matter plus one section per speaker, for scripts and other models.
+function saveTranscriptMarkdown(e) {
+  return saveTranscriptExport(e, "/api/export-markdown", "transcript.md");
+}
+
+async function saveTranscriptExport(e, endpoint, fallbackName) {
   const button = e.currentTarget;
   const original = button.textContent;
   if (button.dataset.saving === "1") return;
   button.dataset.saving = "1";
   button.textContent = "Saving…";
   try {
-    const res = await fetch("/api/export?file=" + encodeURIComponent(CURRENT_FILE));
+    const res = await fetch(endpoint + "?file=" + encodeURIComponent(CURRENT_FILE));
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
       try { detail = (await res.json()).error || detail; } catch (_error) {}
       throw new Error(detail);
     }
     const blob = await res.blob();
-    const name = filenameFromDisposition(res.headers.get("Content-Disposition")) || "transcript.html";
-    const url = URL.createObjectURL(blob);
-    const anchor = el("a", { href: url, download: name });
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    // Revoked late: Safari cancels the download if the blob dies too early.
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    downloadBlob(blob, filenameFromDisposition(res.headers.get("Content-Disposition")) || fallbackName);
     flashLabel(button, "Saved", 1400, original);
   } catch (error) {
     button.title = "Could not save transcript: " + String(error);
@@ -1211,6 +1227,11 @@ function renderTranscript(data, opts = {}) {
         onclick: saveTranscriptHtml,
         title: "Download this transcript as one self-contained HTML file you can share",
       }, "Save HTML"),
+      STANDALONE ? null : el("button", {
+        class: "btn",
+        onclick: saveTranscriptMarkdown,
+        title: "Download this transcript as structured Markdown (front matter, one section per speaker, tool calls in fenced blocks)",
+      }, "Save Markdown"),
       el("button", { class: "btn", onclick: scrollToEnd }, "⤓ Jump to end"),
       mica ? mica.lock : null
     )
@@ -1402,6 +1423,116 @@ function jumpUser(dir) {
   }
 }
 
+// The outline is a graph of the conversation, drawn like a Mermaid flowchart:
+// the user prompts form the spine, and each sub-agent the conversation spawned
+// (and each abandoned branch) hangs off the prompt it happened under. It is
+// read back off the rendered transcript, so it always matches what's shown.
+let OUTLINE_GRAPH = [];
+
+function outlineText(node) {
+  return ((($(".turn-body", node) || {}).textContent) || "").trim().replace(/\s+/g, " ");
+}
+
+// [{kind: "user"|"subagent"|"branch", label, full, node, child, ts, parent}]
+// in document order; `parent` is the index of the user prompt a side node
+// hangs off (-1 before the first prompt).
+function outlineGraphModel(t) {
+  const anchors = $$(".turn-user:not(.sidechain), .branch-block, .subagent-call", t).filter((n) => {
+    if (n.classList.contains("branch-block")) return true;
+    if (n.closest(".branch-block")) return false;
+    // A call made by an inline (sidechain) sub-agent belongs to that sub-agent.
+    return !(n.classList.contains("subagent-call") && n.closest(".sidechain"));
+  });
+  const model = [];
+  let lastUser = -1;
+  let userNumber = 0;
+  const claimed = new Set();
+  for (const node of anchors) {
+    if (node.classList.contains("branch-block")) {
+      const label = ((node.querySelector(".tool-name") || {}).textContent || "abandoned branch").replace(/^⑂\s*/, "");
+      model.push({ kind: "branch", label, full: label, node, parent: lastUser });
+    } else if (node.classList.contains("subagent-call")) {
+      const child = node.dataset.childFile || "";
+      if (child) claimed.add(child);
+      const label = node.dataset.subagentLabel || "sub-agent";
+      model.push({ kind: "subagent", label, full: label, node, child, parent: lastUser });
+    } else {
+      const full = outlineText(node);
+      lastUser = model.length;
+      model.push({
+        kind: "user", n: ++userNumber, label: full.slice(0, OUTLINE_MAX) || "(empty message)",
+        full, node, ts: node.dataset.ts || "", parent: -1,
+      });
+    }
+  }
+  // Child sessions the sidebar knows about but no call in this transcript
+  // names (e.g. Codex sub-agents, guardians): place each under the last prompt
+  // sent before it started.
+  const orphans = STANDALONE ? [] : SESSIONS.filter(
+    (s) => s.is_subagent && s.parent_file && s.parent_file === CURRENT_FILE && !claimed.has(s.file)
+  );
+  orphans.sort((a, b) => String(a.first_ts || "").localeCompare(String(b.first_ts || "")));
+  for (const s of orphans) {
+    const started = Date.parse(s.first_ts || "");
+    let parent = -1;
+    model.forEach((g, i) => {
+      const ts = Date.parse(g.ts || "");
+      if (g.kind === "user" && (Number.isNaN(started) || Number.isNaN(ts) || ts <= started)) parent = i;
+    });
+    // After the parent's existing side nodes, before the next prompt.
+    let at = parent + 1;
+    while (at < model.length && model[at].kind !== "user") at++;
+    const label = s.subagent_type === "guardian" ? "[guardian] " + (s.title || "") : (s.title || "sub-agent");
+    // Keep the `parent` indices of the nodes being shifted down pointing at the same prompts.
+    for (let i = at; i < model.length; i++) if (model[i].parent >= at) model[i].parent++;
+    model.splice(at, 0, { kind: "subagent", label, full: label, node: null, child: s.file, parent });
+  }
+  return model;
+}
+
+function graphUserNode(g) {
+  const item = el(
+    "div",
+    { class: "outline-item g-node g-user", title: g.full.slice(0, 500) },
+    el("span", { class: "outline-num g-num" }, String(g.n)),
+    el("span", { class: "outline-text g-label" }, el("span", { class: "g-text" }, g.label))
+  );
+  item.addEventListener("click", () => scrollToTurn(g.node));
+  return item;
+}
+
+function graphSideNode(g) {
+  const isSub = g.kind === "subagent";
+  const canOpen = isSub && g.child && !STANDALONE;
+  const item = el(
+    "div",
+    {
+      class: "g-node g-side " + (isSub ? "g-sub" : "g-branch"),
+      title: isSub
+        ? (g.node ? "Sub-agent call: click to show it" : "Sub-agent session: click to open it") + "\n" + g.full
+        : g.full,
+    },
+    el("span", { class: "g-icon", "aria-hidden": "true" }, isSub ? "◆" : "⑂"),
+    el("span", { class: "outline-text g-label" }, el("span", { class: "g-text" }, g.label)),
+    canOpen && g.node
+      ? el("button", {
+          class: "g-open", type: "button", title: "Open the sub-agent's session", "aria-label": "Open sub-agent session",
+          onclick: (e) => { e.stopPropagation(); openSession(g.child); },
+        }, "↗")
+      : null
+  );
+  item.addEventListener("click", () => {
+    if (!g.node) {
+      if (canOpen) openSession(g.child);
+      return;
+    }
+    g.node.classList.remove("collapsed");
+    g.node.scrollIntoView({ block: "start" });
+    $("#main").scrollBy(0, -headerOffset());
+  });
+  return item;
+}
+
 function buildOutline() {
   const t = $("#transcript");
   // top-level user prompts only — skip sub-agent (sidechain) prompts
@@ -1411,56 +1542,117 @@ function buildOutline() {
   const list = $("#outline-list");
   const nav = $("#nav-buttons");
   list.innerHTML = "";
+  OUTLINE_GRAPH = outlineGraphModel(t);
 
-  if (!USER_TURNS.length) {
+  if (!OUTLINE_GRAPH.length) {
     outline.hidden = true;
     nav.hidden = true;
     document.body.classList.remove("has-outline");
     return;
   }
   outline.hidden = false;
-  nav.hidden = false;
+  nav.hidden = !USER_TURNS.length;
   document.body.classList.add("has-outline");
 
-  // Walk user prompts and abandoned-branch markers together in document order so
-  // branches appear in the outline at the point they occur. Branch entries use a
-  // separate class so they stay out of the numbered `.outline-item` sequence that
-  // highlightOutline()/nav rely on.
-  const anchors = $$(".turn-user:not(.sidechain), .branch-block", t).filter((n) =>
-    n.classList.contains("branch-block") ? true : !n.closest(".branch-block")
-  );
-  let ui = 0;
-  anchors.forEach((node) => {
-    if (node.classList.contains("branch-block")) {
-      const label = ((node.querySelector(".tool-name") || {}).textContent || "abandoned branch").replace(/^⑂\s*/, "");
-      const item = el(
-        "div",
-        { class: "outline-branch", title: label },
-        el("span", { class: "outline-num" }, "⑂"),
-        el("span", { class: "outline-text" }, label)
-      );
-      item.addEventListener("click", () => {
-        node.classList.remove("collapsed");
-        node.scrollIntoView({ block: "start" });
-        $("#main").scrollBy(0, -20);
-      });
-      list.append(item);
-      return;
-    }
-    const i = ui++;
-    node.id = "user-turn-" + i;
-    const full = (($(".turn-body", node) || {}).textContent || "").trim().replace(/\s+/g, " ");
-    const label = full.slice(0, OUTLINE_MAX) || "(empty message)";
-    const item = el(
-      "div",
-      { class: "outline-item", title: full.slice(0, 500) },
-      el("span", { class: "outline-num" }, String(i + 1)),
-      el("span", { class: "outline-text" }, label)
-    );
-    item.addEventListener("click", () => scrollToTurn(node));
-    list.append(item);
-  });
+  // User prompts keep the `.outline-item` class (and document order) that
+  // highlightOutline()/nav rely on; side nodes stay out of that sequence.
+  const graph = el("div", { class: "graph" });
+  for (const g of OUTLINE_GRAPH) graph.append(g.kind === "user" ? graphUserNode(g) : graphSideNode(g));
+  list.append(graph);
   highlightOutline();
+}
+
+// ---------- DIAGRAM.md: the outline graph as Mermaid source ----------
+// Mermaid label text inside "…": entity codes for the characters that would
+// end or confuse the label, one line, bounded length.
+function mermaidLabel(text, max = 60) {
+  let s = String(text || "").replace(/\s+/g, " ").trim();
+  if (s.length > max) s = s.slice(0, max - 1).trimEnd() + "…";
+  return s.replace(/[#"<>`]/g, (c) => ({ "#": "#35;", '"': "#quot;", "<": "#lt;", ">": "#gt;", "`": "#96;" }[c]));
+}
+
+function mdTableCell(text, max = 300) {
+  let s = String(text || "").replace(/\s+/g, " ").trim();
+  if (s.length > max) s = s.slice(0, max - 1).trimEnd() + "…";
+  return s.replace(/\|/g, "\\|") || " ";
+}
+
+function diagramMarkdown(model, data) {
+  const counts = { subagent: 0, branch: 0 };
+  const ids = model.map((g) => (g.kind === "user" ? "U" + g.n : (g.kind === "subagent" ? "S" : "B") + ++counts[g.kind]));
+  const lines = ["flowchart TD"];
+  const needsStart = model.some((g) => g.kind !== "user" && g.parent < 0);
+  if (needsStart) lines.push('  START(("start"))');
+  let prevUser = needsStart ? "START" : null;
+  const subs = [];
+  const branches = [];
+  model.forEach((g, i) => {
+    const id = ids[i];
+    if (g.kind === "user") {
+      lines.push(`  ${id}["${mermaidLabel(g.n + ". " + g.label)}"]`);
+      if (prevUser) lines.push(`  ${prevUser} --> ${id}`);
+      prevUser = id;
+    } else {
+      const from = g.parent >= 0 ? ids[g.parent] : "START";
+      if (g.kind === "subagent") {
+        lines.push(`  ${id}{{"${mermaidLabel(g.label)}"}}`);
+        lines.push(`  ${from} -.->|sub-agent| ${id}`);
+        subs.push(id);
+      } else {
+        lines.push(`  ${id}>"${mermaidLabel("⑂ " + g.label)}"]`);
+        lines.push(`  ${from} -.- ${id}`);
+        branches.push(id);
+      }
+    }
+  });
+  lines.push("  classDef user fill:#e8f0fe,stroke:#1f6feb,color:#0b2a5b");
+  lines.push("  classDef subagent fill:#fdf1e7,stroke:#c0492a,color:#4a1d0f");
+  lines.push("  classDef branch fill:#f4f4f4,stroke:#999,stroke-dasharray:4 3,color:#555");
+  const users = ids.filter((id, i) => model[i].kind === "user");
+  if (users.length) lines.push("  class " + users.join(",") + " user");
+  if (subs.length) lines.push("  class " + subs.join(",") + " subagent");
+  if (branches.length) lines.push("  class " + branches.join(",") + " branch");
+
+  const title = (data && data.title) || "(untitled session)";
+  const facts = [
+    data && data.agent ? "Agent: " + agentLabel(data.agent) : "",
+    data && data.id ? "Session: `" + data.id + "`" : "",
+    `${users.length} user message${users.length === 1 ? "" : "s"}`,
+    `${subs.length} sub-agent${subs.length === 1 ? "" : "s"}`,
+    branches.length ? `${branches.length} abandoned branch${branches.length === 1 ? "" : "es"}` : "",
+    "Exported: " + new Date().toISOString().slice(0, 16).replace("T", " ") + " UTC",
+  ].filter(Boolean);
+  const rows = model.map((g, i) => {
+    const type = g.kind === "user" ? "user" : g.kind === "subagent" ? "sub-agent" : "abandoned branch";
+    const extra = g.kind === "subagent" && g.child ? " (session: `" + g.child.replace(/`/g, "") + "`)" : "";
+    return `| ${ids[i]} | ${type} | ${mdTableCell(g.full)}${extra} |`;
+  });
+  return [
+    "# Conversation graph: " + title.replace(/\s+/g, " "),
+    "",
+    facts.join(" · "),
+    "",
+    "```mermaid",
+    ...lines,
+    "```",
+    "",
+    "## Nodes",
+    "",
+    "| Node | Type | Text |",
+    "|---|---|---|",
+    ...rows,
+    "",
+  ].join("\n");
+}
+
+function saveDiagram(e) {
+  const button = e.currentTarget;
+  if (!OUTLINE_GRAPH.length) return;
+  downloadBlob(
+    new Blob([diagramMarkdown(OUTLINE_GRAPH, CURRENT_DATA)], { type: "text/markdown;charset=utf-8" }),
+    "DIAGRAM.md"
+  );
+  flashLabel(button, "Saved", 1200);
 }
 
 function highlightOutline() {
@@ -1520,7 +1712,7 @@ function turnShell(kind, label, ev, bodyNodes) {
   );
   return el(
     "div",
-    { class: `turn turn-${kind}` + (ev.is_sidechain ? " sidechain" : "") },
+    { class: `turn turn-${kind}` + (ev.is_sidechain ? " sidechain" : ""), "data-ts": ev.ts || null },
     head,
     el("div", { class: "turn-body" }, ...bodyNodes)
   );
@@ -1960,10 +2152,21 @@ function renderTool(b) {
     bodyKids.push(el("div", { class: "tool-section-label muted" }, "No result recorded"));
   }
 
-  return toolShell(name, isErr, [
+  return markSubagentCall(toolShell(name, isErr, [
     el("span", { class: "tool-summary", title: fmt.summary }, fmt.summary),
     callerLabel(b.caller) ? el("span", { class: "tool-caller" }, callerLabel(b.caller)) : null,
-  ], bodyKids);
+  ], bodyKids), name, fmt.summary, b.child_file);
+}
+
+// Tool calls that hand work to a sub-agent: Claude Code's Task/Agent, opencode's
+// task, Codex's spawn_agent. Tagged so the outline graph can branch at them.
+const SUBAGENT_TOOL_RE = /^(task|agent|spawn_agent|spawn_subagent)$/i;
+function markSubagentCall(block, name, summary, childFile) {
+  if (!SUBAGENT_TOOL_RE.test(name || "")) return block;
+  block.classList.add("subagent-call");
+  block.dataset.subagentLabel = summary || name;
+  if (childFile) block.dataset.childFile = childFile;
+  return block;
 }
 
 // Codex tool (top-level event; summary precomputed server-side, result is a dict).
@@ -2002,10 +2205,10 @@ function renderCodexTool(ev) {
     bodyKids.push(el("div", { class: "tool-section-label muted" }, "No result recorded"));
   }
 
-  return toolShell(name, isErr, [
+  return markSubagentCall(toolShell(name, isErr, [
     ev.status ? el("span", { class: "status-tag" }, ev.status) : null,
     el("span", { class: "tool-summary", title: ev.summary || "" }, ev.summary || ""),
-  ], bodyKids);
+  ], bodyKids), name, ev.summary, ev.child_file);
 }
 
 function preFrom(text, cls = "payload truncatable") {
@@ -2782,6 +2985,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- nav button + outline wiring ----------
+$("#save-diagram").addEventListener("click", saveDiagram);
 $("#nav-prev").addEventListener("click", () => jumpUser(-1));
 $("#nav-next").addEventListener("click", () => jumpUser(1));
 $("#nav-end").addEventListener("click", scrollToEnd);

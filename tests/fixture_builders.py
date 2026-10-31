@@ -2,7 +2,8 @@
 """Fixture builders and harness helpers shared by the test suite.
 
 Builders that write minimal-but-valid on-disk transcripts for each source
-(Claude Code JSONL, Codex rollout JSONL, Cursor CLI JSONL and store.db), plus
+(Claude Code JSONL, Codex rollout JSONL, Cursor CLI JSONL and store.db, ChatGPT
+export zips), plus
 the loopback HTTP harness the server-backed test classes share.
 """
 
@@ -18,6 +19,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+import chatgpt_parser as chatgpt
 import claude_parser as claude
 import codex_parser as codex
 import cursor_parser as cursor
@@ -142,6 +144,7 @@ class ViewerServerTestCase(unittest.TestCase):
             codex.CODEX_HOME,
             (cursor.DB_PATH, cursor.PROJECTS_DIR, cursor.CHATS_DIR),
             opencode.DB_PATH,
+            list(chatgpt.EXPORT_PATHS),
         )
         claude.configure(cls.projects_dir)
         # Hermetic viewer-owned files — never touch the user's real names.json
@@ -161,6 +164,9 @@ class ViewerServerTestCase(unittest.TestCase):
         cls.opencode_db = tmp / "opencode" / "opencode.db"
         cls.opencode_parent, cls.opencode_child = _write_opencode_db(cls.opencode_db)
         opencode.configure(cls.opencode_db)
+        cls.chatgpt_export = _write_chatgpt_export(tmp / "chatgpt" / "export.zip")
+        cls.chatgpt_file = chatgpt.SESSION_SCHEME + chatgpt_conversation()["id"]
+        chatgpt.configure(cls.chatgpt_export)
 
         # Serve on an ephemeral loopback port in a background thread.
         cls.httpd, cls.port, cls.thread = start_http_server(server.Handler)
@@ -177,6 +183,7 @@ class ViewerServerTestCase(unittest.TestCase):
             chats_dir=cls._old_parser_config[2][2],
         )
         opencode.configure(cls._old_parser_config[3])
+        chatgpt.configure(cls._old_parser_config[4])
         cls._tmp.cleanup()
 
     def get(self, path: str):
@@ -654,3 +661,117 @@ def _write_opencode_db(db_path: Path) -> tuple[str, str]:
     conn.commit()
     conn.close()
     return parent_id, child_id
+
+
+# A 1×1 transparent PNG: small enough to inline, real enough to sniff.
+TINY_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082"
+)
+
+
+def _chatgpt_message(node_id, role, content, create_time, **extra):
+    message = {
+        "id": node_id,
+        "author": {"role": role, "name": extra.pop("author_name", None)},
+        "create_time": create_time,
+        "content": content,
+        "recipient": extra.pop("recipient", "all"),
+        "metadata": extra.pop("metadata", {}),
+    }
+    message.update(extra)
+    return message
+
+
+def chatgpt_conversation(conv_id: str = "c0ffee00-0000-4000-8000-000000000001",
+                         title: str = "Netboot planning", update_time: float = 1767225900.0) -> dict:
+    """One conversation exercising what chatgpt_parser handles: an edited
+    prompt (so an abandoned branch), hidden and custom-instruction messages,
+    thoughts, a citation marker, a tool round trip, and an uploaded image."""
+    t0 = 1767225600.0  # 2026-01-01T00:00:00Z
+    nodes = [
+        ("root", None, None),
+        ("sys", "root", _chatgpt_message(
+            "sys", "system", {"content_type": "text", "parts": [""]}, None,
+            metadata={"is_visually_hidden_from_conversation": True})),
+        ("ctx", "sys", _chatgpt_message(
+            "ctx", "user", {"content_type": "user_editable_context",
+                            "user_profile": "I run a home lab.", "user_instructions": "Be terse."},
+            None, metadata={"is_visually_hidden_from_conversation": False})),
+        ("u1-old", "ctx", _chatgpt_message(
+            "u1-old", "user", {"content_type": "text", "parts": ["abandonedword first draft"]}, t0)),
+        ("a1-old", "u1-old", _chatgpt_message(
+            "a1-old", "assistant", {"content_type": "text", "parts": ["old reply"]}, t0 + 5,
+            metadata={"model_slug": "gpt-4o"})),
+        ("u1", "ctx", _chatgpt_message(
+            "u1", "user", {"content_type": "text", "parts": ["How do I set up netboot.xyz?"]}, t0 + 60)),
+        ("th", "u1", _chatgpt_message(
+            "th", "assistant", {"content_type": "thoughts", "thoughts": [
+                {"summary": "Planning", "content": "Consider dnsmasq proxy mode.", "chunks": [], "finished": True}]},
+            t0 + 61, metadata={"model_slug": "gpt-5-thinking"})),
+        ("rr", "th", _chatgpt_message(
+            "rr", "assistant", {"content_type": "reasoning_recap", "content": "Thought for 3s"}, t0 + 62,
+            metadata={"model_slug": "gpt-5-thinking"})),
+        ("call", "rr", _chatgpt_message(
+            "call", "assistant", {"content_type": "code", "language": "unknown", "text": "print(2 + 2)"},
+            t0 + 63, recipient="python", metadata={"model_slug": "gpt-5-thinking"})),
+        ("out", "call", _chatgpt_message(
+            "out", "tool", {"content_type": "execution_output", "text": "4"}, t0 + 64, author_name="python")),
+        ("a1", "out", _chatgpt_message(
+            "a1", "assistant", {"content_type": "text", "parts": [
+                "Use proxy DHCP citeturn0search0 and see "
+                "urlthe docshttps://netboot.xyz/docs."]},
+            t0 + 65, metadata={"model_slug": "gpt-5-thinking", "content_references": [
+                {"matched_text": "citeturn0search0", "type": "grouped_webpages",
+                 "items": [{"title": "dnsmasq man page", "url": "https://example.test/dnsmasq"}]}]})),
+        ("u2", "a1", _chatgpt_message(
+            "u2", "user", {"content_type": "multimodal_text", "parts": [
+                {"content_type": "image_asset_pointer", "asset_pointer": "file-service://file-Abc123",
+                 "size_bytes": len(TINY_PNG), "width": 1, "height": 1},
+                "What is in this screenshot?"]},
+            t0 + 120, metadata={"attachments": [
+                {"id": "file-Abc123", "name": "screenshot.png", "mime_type": "image/png"}]})),
+        ("a2", "u2", _chatgpt_message(
+            "a2", "assistant", {"content_type": "text", "parts": ["A single transparent pixel."]}, t0 + 125,
+            metadata={"model_slug": "gpt-5-thinking"})),
+    ]
+    mapping = {node_id: {"id": node_id, "message": msg, "parent": parent, "children": []}
+               for node_id, parent, msg in nodes}
+    for node_id, parent, _msg in nodes:
+        if parent:
+            mapping[parent]["children"].append(node_id)
+    return {
+        "id": conv_id, "conversation_id": conv_id, "title": title,
+        "create_time": t0, "update_time": update_time,
+        "default_model_slug": "gpt-5-thinking", "current_node": "a2", "mapping": mapping,
+        "is_archived": False,
+    }
+
+
+def _write_chatgpt_export(path: Path, conversations: list[dict] | None = None, *,
+                          sharded: bool = False, extracted: bool = False) -> Path:
+    """A ChatGPT data export at `path` (a .zip, or a directory if `extracted`),
+    with the conversation JSON either whole or split into shards."""
+    import zipfile
+
+    conversations = conversations if conversations is not None else [chatgpt_conversation()]
+    if sharded:
+        files = {f"conversations-{i:03d}.json": json.dumps([c]) for i, c in enumerate(conversations)}
+    else:
+        files = {"conversations.json": json.dumps(conversations)}
+    files["user.json"] = json.dumps({"id": "user-test"})
+    blobs = {"file-Abc123-screenshot.png": TINY_PNG}
+    if extracted:
+        path.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (path / name).write_text(text, encoding="utf-8")
+        for name, raw in blobs.items():
+            (path / name).write_bytes(raw)
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, text in files.items():
+            zf.writestr(name, text)
+        for name, raw in blobs.items():
+            zf.writestr(name, raw)
+    return path

@@ -20,11 +20,13 @@ import codex_parser as codex
 import cursor_parser as cursor
 import event_schema
 import opencode_parser as opencode
+import chatgpt_parser as chatgpt
 from tests.fixture_builders import (
     _write_cli_session,
     _write_cli_store,
     _write_fixture_session,
     _write_guardian_sessions,
+    _write_chatgpt_export,
     _write_opencode_db,
 )
 
@@ -94,6 +96,8 @@ class EventSchemaConformanceTests(unittest.TestCase):
         cls.opencode_db = tmp / "opencode" / "opencode.db"
         cls.opencode_parent, cls.opencode_child = _write_opencode_db(cls.opencode_db)
         opencode.configure(cls.opencode_db)
+        cls._old_chatgpt = list(chatgpt.EXPORT_PATHS)
+        chatgpt.configure(_write_chatgpt_export(tmp / "chatgpt" / "export.zip"))
 
     @classmethod
     def tearDownClass(cls):
@@ -102,13 +106,14 @@ class EventSchemaConformanceTests(unittest.TestCase):
         cursor.configure(cls._old_cursor[0], projects_dir=cls._old_cursor[1],
                          chats_dir=cls._old_cursor[2])
         opencode.configure(cls._old_opencode)
+        chatgpt.configure(cls._old_chatgpt)
         cls._tmp.cleanup()
 
     def assertConforms(self, errors):
         self.assertEqual(errors, [], "\n".join(errors))
 
     def test_all_summaries_conform(self):
-        for module in (claude, codex, cursor, opencode):
+        for module in (claude, codex, cursor, opencode, chatgpt):
             summaries = module.list_sessions()
             self.assertTrue(summaries, f"{module.__name__} listed no fixtures")
             for s in summaries:

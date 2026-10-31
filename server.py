@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Unified Claude Code + Codex + Cursor + opencode transcript browser.
+"""Unified Claude Code + Codex + Cursor + opencode + ChatGPT transcript browser.
 
 A zero-dependency local web app for browsing Claude Code session transcripts
 (under ~/.claude/projects), Codex session transcripts (under ~/.codex/sessions),
 Cursor IDE conversations (from Cursor's state.vscdb), Cursor CLI agent
 transcripts (under ~/.cursor/projects/.../agent-transcripts), and opencode
-sessions (from ~/.local/share/opencode/opencode.db) in a single, time-sorted
-sidebar. Run it and open the printed URL.
+sessions (from ~/.local/share/opencode/opencode.db), plus conversations from
+ChatGPT data-export zips, in a single, time-sorted sidebar. Run it and open the
+printed URL.
 
 Parsing lives in claude_parser.py / codex_parser.py / cursor_parser.py /
-opencode_parser.py (one module per transcript source, all emitting the same
+opencode_parser.py / chatgpt_parser.py (one module per transcript source, all emitting the same
 event shapes); this module is the HTTP layer plus what spans sources: the
 unified session list, full-text search, viewer-owned custom names, and
 summary-cache persistence. Bundling a session into a shareable single-file
-HTML export lives in export_html.py.
+HTML export lives in export_html.py; the Markdown export in export_markdown.py.
 
 Optional Mica: when the Mica daemon is capturing transcripts (see mica/),
 the viewer reads its store (never writes it) to flag transcripts
@@ -25,6 +26,7 @@ Usage:
                      [--projects-dir PATH] [--codex-home PATH]
                      [--cursor-db PATH] [--cursor-projects-dir PATH]
                      [--cursor-chats-dir PATH] [--opencode-db PATH]
+                     [--chatgpt-export PATH ...]
                      [--custom-names-file PATH]
                      [--mica PATH | --no-mica]
 """
@@ -43,11 +45,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import chatgpt_parser as chatgpt
 import claude_parser as claude
 import codex_parser as codex
 import common
 import cursor_parser as cursor
 import export_html
+import export_markdown
 import opencode_parser as opencode
 import settings_check
 from mica import store as micastore
@@ -63,6 +67,7 @@ PARSERS = {
     "codex": codex,
     "cursor": cursor,
     "opencode": opencode,
+    "chatgpt": chatgpt,
 }
 
 # Scheme prefix -> parse-by-id, for database-backed sessions.
@@ -70,6 +75,14 @@ SCHEME_PARSERS = {
     cursor.SESSION_SCHEME: cursor.parse_session_by_id,
     cursor.CLI_SESSION_SCHEME: cursor.parse_cli_store_by_id,
     opencode.SESSION_SCHEME: opencode.parse_session_by_id,
+    chatgpt.SESSION_SCHEME: chatgpt.parse_session_by_id,
+}
+# Cheaper parses for callers that only need the text (search, Markdown export):
+# a ChatGPT session otherwise reads every image it shows out of the export zip.
+LIGHT_SCHEME_PARSERS = {
+    chatgpt.SESSION_SCHEME: lambda conversation_id: chatgpt.parse_session_by_id(
+        conversation_id, with_images=False
+    ),
 }
 # Session ids that name a row in a database rather than a file on disk. These
 # never resolve to a transcript path, so every path-based check skips them.
@@ -425,16 +438,20 @@ def parse_session(target: Path) -> dict | None:
     return parse(target) if parse else None
 
 
-def load_session(file_id: str) -> dict | None:
+def load_session(file_id: str, *, text_only: bool = False) -> dict | None:
     """Resolve a session id to parsed data, for both `/api/session` and search.
 
     Cursor IDE sessions use ``cursordb:<composerId>``; Cursor CLI store.db
     sessions use ``cursorcli:<sessionId>``; opencode sessions use
-    ``opencode:<sessionID>``. Everything else is a real transcript path that
-    must resolve under an allowed root.
+    ``opencode:<sessionID>``; ChatGPT export conversations use
+    ``chatgpt:<conversationId>``. Everything else is a real transcript path
+    that must resolve under an allowed root. ``text_only`` lets a source skip
+    work that only matters for display (embedding images).
     """
     for scheme, parse_by_id in SCHEME_PARSERS.items():
         if file_id.startswith(scheme):
+            if text_only:
+                parse_by_id = LIGHT_SCHEME_PARSERS.get(scheme, parse_by_id)
             data = parse_by_id(file_id[len(scheme):])
             return _apply_custom_name(data) if data is not None else None
     target = Path(file_id).expanduser().resolve()
@@ -664,7 +681,7 @@ def session_segments(s: dict, *, normalized: bool = False) -> tuple[str, str]:
     cached = _TEXT_CACHE.get(key)
     if not cached or cached[0] != mtime:
         try:
-            data = load_session(key)
+            data = load_session(key, text_only=True)
         except Exception:  # noqa: BLE001
             data = None
         user, rest = _session_segments(data) if data else ("", "")
@@ -679,7 +696,7 @@ def _search_title_segments(session: dict) -> tuple[str, str]:
     native_titles = []
     # Sources with stored AI- or user-authored names. Codex's legacy `title`
     # is usually the first prompt, but newer versions also expose `ai_title`.
-    if session.get("agent") in {"claude", "codex", "cursor", "opencode"}:
+    if session.get("agent") in {"claude", "codex", "cursor", "opencode", "chatgpt"}:
         for title in (
             session.get("original_title"),
             session.get("claude_title"),
@@ -787,7 +804,9 @@ def search_sessions(query: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PROMPT_EXPORT_MAX_SESSIONS = 2000
-_AGENT_LABELS = {"claude": "Claude", "codex": "Codex", "cursor": "Cursor", "opencode": "opencode"}
+_AGENT_LABELS = {
+    "claude": "Claude", "codex": "Codex", "cursor": "Cursor", "opencode": "opencode", "chatgpt": "ChatGPT",
+}
 
 
 def _prompt_text(ev: dict) -> str:
@@ -1144,6 +1163,29 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if route == "/api/export-markdown":
+            file_arg = self._session_file_arg(parsed)
+            if file_arg is None:
+                return
+            try:
+                data = load_session(file_arg, text_only=True)
+                if data is None:
+                    self._send_json({"error": "forbidden"}, status=403)
+                    return
+                data.setdefault("file", file_arg)
+                body = export_markdown.session_markdown(data).encode("utf-8")
+                filename = export_markdown.export_filename(data)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, status=500)
+                return
+            # Same [A-Za-z0-9-] + suffix guarantee as /api/export's filename.
+            self._send_bytes(
+                body,
+                "text/markdown; charset=utf-8",
+                extra_headers=(("Content-Disposition", f'attachment; filename="{filename}"'),),
+            )
+            return
+
         self.send_error(404)
 
     def do_POST(self):
@@ -1308,6 +1350,14 @@ def main():
         help="opencode.db (or the opencode data dir holding it)",
     )
     ap.add_argument(
+        "--chatgpt-export",
+        type=Path,
+        action="append",
+        default=None,
+        help="ChatGPT data-export .zip, extracted export dir, or a dir of them; repeatable "
+        f"(default {chatgpt.DEFAULT_EXPORTS_DIR})",
+    )
+    ap.add_argument(
         "--mica",
         type=Path,
         default=micastore.DEFAULT_STORE_DIR,
@@ -1325,6 +1375,7 @@ def main():
         chats_dir=args.cursor_chats_dir,
     )
     opencode.configure(args.opencode_db)
+    chatgpt.configure(args.chatgpt_export)
     configure_mica(args.mica.expanduser(), enabled=not args.no_mica)
     # Enforce the Host allowlist only on the safe loopback default; if the user
     # deliberately binds elsewhere for LAN access, step aside so it still works.
@@ -1332,13 +1383,16 @@ def main():
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
-    print("Claude Code + Codex + Cursor + opencode transcript browser")
+    print("Claude Code + Codex + Cursor + opencode + ChatGPT transcript browser")
     print(f"  claude projects: {claude.PROJECTS_DIR}")
     print(f"  codex sessions:  {codex.SESSIONS_DIR}")
     print(f"  cursor db:       {cursor.DB_PATH}")
     print(f"  cursor projects: {cursor.PROJECTS_DIR}")
     print(f"  cursor chats:    {cursor.CHATS_DIR}")
     print(f"  opencode db:     {opencode.DB_PATH}")
+    exports = chatgpt.discover_exports()
+    print(f"  chatgpt exports: {', '.join(str(e.path) for e in exports) or 'none'}"
+          f" (from {', '.join(str(p) for p in chatgpt.EXPORT_PATHS)})")
     if MICA is not None:
         print(f"  Mica:     {MICA.root}")
     print(f"  serving at:      {url}")

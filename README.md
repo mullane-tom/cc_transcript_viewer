@@ -15,6 +15,8 @@ It reads:
   `~/.cursor/chats/<workspace-hash>/<session>/store.db` (full fidelity), with a
   lossy JSONL fallback under `~/.cursor/projects/<project>/agent-transcripts/`
 - opencode sessions from its SQLite database at `~/.local/share/opencode/opencode.db`
+- ChatGPT conversations from the `.zip` that ChatGPT's **Export data** emails you (read in place,
+  never extracted) — see [ChatGPT exports](#chatgpt-exports)
 
 Nothing is uploaded anywhere. Transcript sources are opened read-only; the only write is the
 viewer-owned custom-names file. The app listens on loopback only, contains no outbound-network code,
@@ -97,6 +99,7 @@ python3 server.py --cursor-chats-dir PATH     # different ~/.cursor/chats (CLI s
 python3 server.py --cursor-projects-dir PATH  # different ~/.cursor/projects (CLI JSONL fallback)
 python3 server.py --opencode-db PATH     # different opencode.db (or the opencode data dir holding it)
 python3 server.py --custom-names-file PATH # different custom transcript names file
+python3 server.py --chatgpt-export PATH  # ChatGPT export .zip / extracted dir / dir of them (repeatable)
 ```
 
 By default the server binds **127.0.0.1** (loopback only), so it isn't reachable from other machines
@@ -202,6 +205,23 @@ accumulated.
   > and their output, file contents that were read or written, your `cwd` and branch names, and any
   > secrets that passed through the conversation. Read it before you share it.
 
+- **Save transcript as Markdown.** **Save Markdown**, next to Save HTML, downloads the open session
+  as a `.md` file built for scripts and other models rather than for reading in a browser: YAML
+  front matter (agent, session id, model, cwd, branch, first/last activity), then one
+  `## User · #N` / `## Assistant` section per change of speaker with an italic timestamp/model line.
+  Inside an assistant section, thinking is a `### Thinking` blockquote, each tool call is
+  `### Tool: <name>` with its input and `#### Result` (or `#### Error`) in fenced blocks, and text
+  after one of those starts a `### Reply` subsection, so every line belongs to exactly one heading.
+  Fences grow past any backtick run in their content, so tool output can't break the structure.
+  Tool results are cut at 10,000 characters (with a note saying how much was dropped); abandoned
+  branches render two heading levels deeper. The same renderer runs from the command line:
+
+  ```bash
+  python3 export_markdown.py ~/.claude/projects/<project>/<session>.jsonl --out notes/
+  python3 export_markdown.py --chatgpt-export ~/Downloads/chatgpt-export.zip --out chatgpt-md/
+  ```
+
+  A bulk run names files `YYYY-MM-DD-<agent>-<title>-<id8>.md` and writes an `INDEX.md` table.
 - **Pull-request links.** Claude Code sessions associated with a PR show a safe, clickable PR link in
   the transcript header.
 - **Local source links.** Absolute Markdown links inside a session's workspace open through macOS
@@ -225,10 +245,19 @@ accumulated.
   followed by reasoning and the allow/deny decision; generic task/context/token bookkeeping is
   consolidated into one collapsed metadata block per turn. Cursor CLI sub-agents under
   `agent-transcripts/<id>/subagents/` are listed the same way.
-- **Jump between prompts.** A right-side **outline** lists the top-level user messages as truncated,
-  clickable headings and highlights the one you're reading as you scroll. Floating **↑ / ↓** buttons
-  jump to the previous/next user prompt, and **Jump to end** (in the transcript controls) skips to
-  the bottom. Sidebar and outline panels can be collapsed.
+- **Conversation graph.** The right-side panel draws the conversation as a Mermaid-style
+  flowchart: the top-level user prompts are numbered nodes on a vertical spine (click one to jump
+  to it; the one you're reading is highlighted as you scroll), and every sub-agent the conversation
+  spawned branches off the prompt it happened under (◆, on a dotted connector), as does each
+  abandoned branch (⑂, dashed). Clicking a sub-agent node expands its `Task`/`Agent` call in the
+  transcript; its ↗ button opens the sub-agent's own session. Claude Code calls are matched to
+  their sub-agent transcripts by prompt, opencode records the link itself, and child sessions with
+  no matching call (Codex sub-agents, guardians) are placed under the last prompt before they
+  started. **DIAGRAM.md** in the panel header downloads the graph as Mermaid source (`flowchart TD`,
+  rendered natively by GitLab, GitHub, and Obsidian) plus a node table with each prompt's text.
+- **Jump between prompts.** Floating **↑ / ↓** buttons jump to the previous/next user prompt, and
+  **Jump to end** (in the transcript controls) skips to the bottom. Sidebar and graph panels can be
+  collapsed.
 - **Fourteen themes.** Warm, Paper, Botanical, and Lavender cover the quiet solid palettes; Night is
   the standard dark option. The playful set changes the UI as well as its colors: Sorbet uses soft
   pills, while Terminal uses crisp monospace controls.
@@ -381,6 +410,36 @@ fabricated messages directly: matching a capture verifies the saved bytes, not w
 offers no protection from agents. `python server.py --mica DIR` points the viewer at any Mica store, and
 `--no-mica` turns the feature off.
 
+## ChatGPT exports
+
+ChatGPT has no local transcript store, so its source is the data export: **Settings → Data
+controls → Export data** emails a link to a `.zip` holding the whole account history. Point the
+viewer at it with `--chatgpt-export PATH` (repeatable), or drop export zips into
+`~/.config/cc_transcript_viewer/chatgpt/`, which is read by default. `PATH` can be the zip, an
+extracted copy of it, or a folder holding several exports; when the same conversation appears in
+more than one, the most recently updated copy wins. Conversations get a **ChatGPT** chip and badge
+and work like every other session: search, filters, Save HTML, Save Markdown, and the graph.
+
+What the parser does with the export (`chatgpt_parser.py`):
+
+- Reads `conversations.json` or the sharded `conversations-000.json`, `…-001.json`, … of newer
+  exports. Each conversation is a tree (editing a prompt or regenerating a reply forks it); the
+  viewer follows `current_node` back to the root for the live thread and folds the other forks into
+  abandoned-branch blocks at the point they diverged.
+- Folds consecutive assistant messages into one turn: `thoughts` become thinking blocks,
+  messages addressed to a tool (`python`, `web`, `dalle.text2im`, …) become tool calls, and the
+  following `tool` message becomes their result. "Thought for N seconds" recaps and hidden system
+  messages are dropped; custom instructions show as an instructions card.
+- Rewrites ChatGPT's inline citation markers (`\ue200cite\ue202turn0search3\ue201`, or `【6†source】`
+  in older exports) into Markdown links when the message's `content_references` name a URL, and
+  into their display text (or nothing) otherwise.
+- Shows uploaded and generated images by reading the `file-….dat` members out of the zip when a
+  conversation is opened. Search and the Markdown export skip them (an `*[image: name]*` note
+  stands in).
+
+The whole export is parsed into memory when it changes — about a quarter of a second for 300
+conversations and 30 MB of JSON — and is otherwise served from that copy.
+
 ## Notes on Codex transcripts
 
 - **Reasoning summaries.** Readable summaries only exist if you set
@@ -501,6 +560,8 @@ reported.
 | `codex_export/cursor_to_codex.py` | Exports Cursor's GPT conversations as Codex rollout JSONL by walking the provider-format message blobs behind `conversationState` (where the real `rs_…` ids and `encrypted_content` live), rather than the rendered bubbles. See [Exporting Cursor GPT sessions](#exporting-cursor-gpt-sessions-as-codex-rollouts). |
 | `codex_export/opencode_to_codex.py` | Exports opencode sessions as Codex rollout JSONL, carrying the provider's encrypted reasoning (`reasoning.encrypted` → `encrypted_content`) and splitting opencode's fused tool record into Codex's separate `function_call` / `function_call_output`. Records the provider's reasoning `format` so a non-OpenAI blob isn't mistaken for a replayable one. |
 | `codex_export/codex_rollout.py` | The parts of writing a Codex rollout that aren't specific to any source — record shape, `rollout-<time>-<id>.jsonl` naming, dated output layout — shared by both exporters so they can't drift. |
+| `chatgpt_parser.py` | ChatGPT data-export parsing library: finds exports (zip, extracted directory, or a directory of them), reads the conversation shards in place, walks each conversation tree from `current_node`, folds assistant/tool messages into block-shaped turns, cleans citation markers, and inlines images from the archive on open. Sessions are addressed as `chatgpt:<conversationId>`. Call `configure(paths)` to retarget. |
+| `export_markdown.py` | Renders any parsed session as structured Markdown for `/api/export-markdown`, and as a command-line bulk exporter (`--chatgpt-export` converts a whole export, with an `INDEX.md`). |
 | `export_html.py` | Bundles one parsed session into a self-contained HTML file for `/api/export`: inlines `static/style.css` and `static/app.js` into `static/index.html`, embeds the session as a JSON literal, and re-embeds locally-referenced images as `data:` URIs under a per-image and whole-file size budget. Deliberately has no renderer of its own — the saved page runs the same `app.js`, which detects the embedded payload and switches to standalone mode. |
 | `mica/` | The optional [Mica](#optional-tamper-resistant-backups-mica): `capture.py` (the polling daemon that copies appends into append-only, hash-chained generations and records tamper events), `store.py` (the on-disk format and the read-only `StoreReader` the viewer uses to badge sessions, list deleted ones, and compare a live file with its capture), `install.py` (macOS `_mica` user, root-owned install, ACLs, LaunchDaemon), and `__main__.py` (`python3 -m mica daemon/status/flagged/verify/install/uninstall`). Standard library only, Python 3.9-compatible so it runs on Apple's root-owned interpreter. |
 | `common.py` | Everything the four parsers share: JSONL iteration, JSON/SQLite access, title truncation, timestamp conversion, the sidebar-summary shape (`make_summary`), and the thread-safe fingerprint-keyed `SummaryCache` (plus its `cached_summary` wrapper) all of them use. |
@@ -516,6 +577,7 @@ reported.
 | `tests/test_golden_transcripts.py`, `tests/fixtures/` | Regression tests over checked-in, fictional transcript files whose field shapes were compared with current local stores. The fixture README records the sanitization and review rules. |
 | `tests/test_summary_cache.py`, `tests/test_common.py` | Unit tests for the shared layer: summary-cache round-trip persistence, fingerprint invalidation and dirty-flag races, plus the small helpers in `common.py`. |
 | `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletions (flagged regardless of age or retention settings), delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (flagged with a recorded start and end, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan (which stops a running daemon before re-granting access). |
+| `tests/test_chatgpt_parser.py`, `tests/test_export_markdown.py` | Export discovery (zip, extracted, folder, nested, sharded, duplicates), the tree walk and branch folding, message-type mapping, citation cleanup and image inlining for ChatGPT; the Markdown structure (sections, fences, truncation, branches, both message shapes), `/api/export-markdown`, the bulk CLI, and Claude `Task`/`Agent` → sub-agent links. |
 | `tests/fixture_builders.py` | Shared fixture builders that write temporary minimal-but-valid transcripts and databases for each source, and `ViewerServerTestCase`, a live loopback server over those fixtures. |
 
 ### Transcript format notes

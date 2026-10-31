@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The event contract between the parsers and the frontend.
 
-Every parser (claude_parser, codex_parser, cursor_parser, opencode_parser)
+Every parser (claude_parser, codex_parser, cursor_parser, opencode_parser,
+chatgpt_parser)
 emits a session as
 ``{"agent", "id", "title", "meta", "events", ...}`` where ``events`` is a flat
 list of dicts, each with a ``kind``. The frontend's renderEvent() dispatches on
@@ -11,7 +12,7 @@ the contract can't silently drift.
 
 Two message shapes exist for ``user``/``assistant`` events:
 
-- **Block shape** (Claude Code, Cursor, and opencode): a ``blocks`` list whose items are
+- **Block shape** (Claude Code, Cursor, opencode, and ChatGPT exports): a ``blocks`` list whose items are
   ``{"type": "text"|"thinking"|"image"|"tool_use", ...}``. A ``thinking``
   block may carry ``has_encrypted`` when the provider also returned an opaque
   reasoning blob, i.e. the text is a summary. Tool calls ride
@@ -66,6 +67,9 @@ KINDS = {
 }
 
 BLOCK_TYPES = {"text", "thinking", "image", "tool_use"}
+
+# Every transcript source a summary or session may name as its `agent`.
+AGENTS = ("claude", "codex", "cursor", "opencode", "chatgpt")
 
 
 def _check(errors: list, cond: bool, where: str, message: str) -> None:
@@ -181,7 +185,7 @@ def validate_summary(summary, where: str = "summary") -> list[str]:
         return [f"{where}: summary is not a dict"]
     missing = REQUIRED_SUMMARY_FIELDS - set(summary)
     _check(errors, not missing, where, f"missing required fields {sorted(missing)}")
-    _check(errors, summary.get("agent") in ("claude", "codex", "cursor", "opencode"), where,
+    _check(errors, summary.get("agent") in AGENTS, where,
            f"unknown agent {summary.get('agent')!r}")
     return errors
 
@@ -191,7 +195,7 @@ def validate_session(data, where: str = "session") -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return [f"{where}: session is not a dict"]
-    _check(errors, data.get("agent") in ("claude", "codex", "cursor", "opencode"), where,
+    _check(errors, data.get("agent") in AGENTS, where,
            f"unknown agent {data.get('agent')!r}")
     _check(errors, isinstance(data.get("id"), str) and data.get("id"), where, "needs str 'id'")
     _check(errors, isinstance(data.get("title"), str), where, "needs str 'title'")
