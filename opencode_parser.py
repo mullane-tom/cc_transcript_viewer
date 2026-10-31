@@ -27,6 +27,7 @@ import sqlite3
 from pathlib import Path
 
 import common
+import web_lookup
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 DB_PATH = DEFAULT_DB_PATH
@@ -160,7 +161,7 @@ def _session_counts(conn: sqlite3.Connection, session_ids: list[str]) -> dict[st
         if entry is None:
             continue
         entry["n_tool"] += row["n"]
-        if row["tool"] in ("webfetch", "websearch"):
+        if web_lookup.is_web_tool(row["tool"]):
             entry["n_web"] += row["n"]
     return counts
 

@@ -695,7 +695,11 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
     meta = {}
     first_ts = None
     last_ts = None
-    n_user = n_assistant = n_tool = n_reasoning = n_web = 0
+    n_user = n_assistant = n_tool = n_reasoning = 0
+    # A search can be logged twice — a web_search_call response item and a
+    # web_search_end event sharing its call_id — so count distinct searches.
+    web_ids: set[str] = set()
+    anonymous_web = 0
     model = ""
     mirror_users, mirror_agents = _mirror_message_counts(records)
 
@@ -730,7 +734,10 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
             elif pt == "agent_reasoning":
                 n_reasoning += 1
             elif pt == "web_search_end":
-                n_web += 1
+                if payload.get("call_id"):
+                    web_ids.add(payload["call_id"])
+                else:
+                    anonymous_web += 1
         elif typ == "response_item":
             pt = payload.get("type")
             if pt in {"function_call", "custom_tool_call"}:
@@ -738,7 +745,11 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
             elif pt == "reasoning":
                 n_reasoning += 1
             elif pt == "web_search_call":
-                n_web += 1
+                if payload.get("call_id"):
+                    web_ids.add(payload["call_id"])
+                else:
+                    anonymous_web += 1
+    n_web = len(web_ids) + anonymous_web
 
     st = common.safe_stat(path)
     row = thread_row or {}
@@ -1030,6 +1041,10 @@ def parse_session(path: Path) -> dict:
     tool_calls: dict[str, dict] = {}
     tool_outputs: dict[str, dict] = {}
     web_searches: dict[str, dict] = {}
+    # call_ids with a web_search_call response item. That item renders the
+    # search (with the query from its web_search_end), so the matching
+    # event_msg doesn't render it a second time.
+    web_call_ids: set[str] = set()
     # Normalized text of every real user prompt (event_msg user_message). Used to
     # tell injected context (environment_context, AGENTS.md) apart from the prompt
     # when a `message` response_item repeats the user's turn.
@@ -1133,6 +1148,9 @@ def parse_session(path: Path) -> dict:
             call_id = payload.get("call_id")
             if call_id:
                 web_searches[call_id] = payload
+        elif rec.get("type") == "response_item" and payload.get("type") == "web_search_call":
+            if payload.get("call_id"):
+                web_call_ids.add(payload["call_id"])
 
     row = _read_thread_rows().get(str(path)) or {}
     if row:
@@ -1440,6 +1458,8 @@ def parse_session(path: Path) -> dict:
                         },
                     )
                 )
+            elif pt == "web_search_end" and payload.get("call_id") in web_call_ids:
+                pass  # rendered by its web_search_call response item
             elif pt == "web_search_end":
                 events.append(
                     _event_payload(

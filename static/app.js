@@ -306,6 +306,11 @@ function agentTags(s) {
   ];
 }
 
+// "1 tool call" / "3 tool calls" (or an explicit plural form).
+function plural(n, one, many = one + "s") {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 function agentLabel(a) {
   if (a === "codex") return "Codex";
   if (a === "cursor") return "Cursor";
@@ -805,9 +810,11 @@ function renderSidebar(query) {
         "div",
         { class: "session-meta" },
         el("span", {}, relDays(tsForRel)),
-        el("span", { class: "badge" }, `${s.n_user || 0}💬`),
-        el("span", { class: "badge" }, `${s.n_tool || 0}🔧`),
-        s.n_web ? el("span", { class: "badge" }, `${s.n_web}🌐`) : null,
+        el("span", { class: "badge", title: plural(s.n_user || 0, "user message") }, `${s.n_user || 0}💬`),
+        el("span", { class: "badge", title: plural(s.n_tool || 0, "tool call") }, `${s.n_tool || 0}🔧`),
+        // Web searches and page fetches, counted by the same rule that renders
+        // them as 🌐 blocks in the transcript (web_lookup.is_web_tool).
+        s.n_web ? el("span", { class: "badge", title: plural(s.n_web, "web search or fetch", "web searches and fetches") }, `${s.n_web}🌐`) : null,
         s.agent_name && s.agent_name !== s.title
           ? el("span", { class: "badge", title: "Claude agent name" }, s.agent_name)
           : null,

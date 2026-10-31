@@ -21,6 +21,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import common
+import web_lookup
 
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -436,7 +437,7 @@ def _session_summary_uncached(path: Path) -> dict:
     version = ""
     first_ts = None
     last_ts = None
-    n_user = n_assistant = n_tool = 0
+    n_user = n_assistant = n_tool = n_web = 0
     models: set[str] = set()
 
     for rec in records:
@@ -481,6 +482,7 @@ def _session_summary_uncached(path: Path) -> dict:
             for b in msg.get("content", []) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
                     n_tool += 1
+                    n_web += web_lookup.is_web_tool(b.get("name"))
             n_assistant += 1
 
     sub_meta = _subagent_meta(path, records) if is_subagent else None
@@ -507,6 +509,7 @@ def _session_summary_uncached(path: Path) -> dict:
         n_user=n_user,
         n_assistant=n_assistant,
         n_tool=n_tool,
+        n_web=n_web,
         n_records=len(records),
         model=sorted(models)[0] if models else "",
         mtime=st.st_mtime if st else 0,

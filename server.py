@@ -197,7 +197,7 @@ def _set_custom_name(session: dict, name: str) -> None:
 # ---------------------------------------------------------------------------
 # Summary-cache persistence (the parsers own the caches; we own the file)
 # ---------------------------------------------------------------------------
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 _CACHE_LOCK = threading.Lock()
 _CACHE_LOADED = False
 _PARSER_CACHES = {name: parser.SUMMARY_CACHE for name, parser in PARSERS.items()}

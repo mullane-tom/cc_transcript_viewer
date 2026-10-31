@@ -46,6 +46,7 @@ from datetime import datetime
 from pathlib import Path
 
 import common
+import web_lookup
 import cursor_binary
 
 # macOS default. (Linux: ~/.config/Cursor/...; Windows: %APPDATA%/Cursor/...)
@@ -249,6 +250,13 @@ def _summary_from_composer(conn, cid: str, d: dict, db_mtime: float) -> dict:
         if text and not _synthetic_user_notice(text):
             n_user += 1
     n_tool = sum(1 for h in headers if (h.get("grouping") or {}).get("toolFormerTool") is not None)
+    # Header tool ids aren't names, so only a header that does name its tool
+    # can be counted as a web lookup; the bubbles themselves aren't loaded here.
+    n_web = sum(
+        1 for h in headers
+        if isinstance((h.get("grouping") or {}).get("toolFormerTool"), str)
+        and web_lookup.is_web_tool(h["grouping"]["toolFormerTool"])
+    )
     n_assistant = sum(
         1
         for h in headers
@@ -270,6 +278,7 @@ def _summary_from_composer(conn, cid: str, d: dict, db_mtime: float) -> dict:
         n_user=n_user,
         n_assistant=n_assistant,
         n_tool=n_tool,
+        n_web=n_web,
         n_records=len(headers),
         model=model,
         mtime=mtime,
@@ -1002,7 +1011,7 @@ def _apply_cli_subagent_fields(out: dict, ctx: dict) -> None:
 
 def _cli_session_summary_uncached(path: Path) -> dict:
     records = list(common.iter_jsonl(path))
-    n_user = n_assistant = n_tool = 0
+    n_user = n_assistant = n_tool = n_web = 0
     first_user = ""
 
     for rec in records:
@@ -1020,6 +1029,7 @@ def _cli_session_summary_uncached(path: Path) -> dict:
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
                         n_tool += 1
+                        n_web += web_lookup.is_web_tool(b.get("name"))
 
     ctx = _cli_transcript_context(path)
     st = common.safe_stat(path)
@@ -1033,6 +1043,7 @@ def _cli_session_summary_uncached(path: Path) -> dict:
         n_user=n_user,
         n_assistant=n_assistant,
         n_tool=n_tool,
+        n_web=n_web,
         n_records=len(records),
         mtime=st.st_mtime if st else 0,
     )
@@ -1409,7 +1420,7 @@ def _cli_store_summary_uncached(conn: sqlite3.Connection, path: Path) -> dict:
     created = meta.get("createdAt") or side.get("createdAtMs")
     updated = side.get("updatedAtMs") or created
 
-    n_user = n_assistant = n_tool = 0
+    n_user = n_assistant = n_tool = n_web = 0
     first_user = ""
     for msg in _iter_store_role_messages(conn):
         role = msg.get("role")
@@ -1429,6 +1440,7 @@ def _cli_store_summary_uncached(conn: sqlite3.Connection, path: Path) -> dict:
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool-call":
                         n_tool += 1
+                        n_web += web_lookup.is_web_tool(b.get("toolName") or b.get("name"))
 
     summary = common.make_summary(
         agent="cursor",
@@ -1442,6 +1454,7 @@ def _cli_store_summary_uncached(conn: sqlite3.Connection, path: Path) -> dict:
         n_user=n_user,
         n_assistant=n_assistant,
         n_tool=n_tool,
+        n_web=n_web,
         n_records=n_user + n_assistant + n_tool,
         model=header["model"],
         mtime=_store_db_mtime(path),

@@ -147,6 +147,12 @@ def tool_kind(name) -> str:
     return ""
 
 
+def is_web_tool(name) -> bool:
+    """Whether a tool call is a web search or fetch — the test the sidebar's
+    web count (`n_web`) and the rendered web blocks share."""
+    return bool(tool_kind(name))
+
+
 def from_tool(name, value, result) -> dict | None:
     """The `web` dict for a block-shaped tool call, or None if it isn't one."""
     kind = tool_kind(name)
