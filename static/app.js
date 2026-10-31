@@ -1678,9 +1678,12 @@ function renderEvent(ev) {
     case "guardian_request": return renderGuardianRequest(ev);
     case "guardian_decision": return renderGuardianDecision(ev);
     case "reasoning": return turnShell("reasoning", "Reasoning", ev, [renderReasoning(ev)]);
-    case "tool": return turnShell("tool", "Tool · " + (ev.name || "tool"), ev, [renderCodexTool(ev)]);
+    case "tool": return ev.web
+      ? turnShell("web_call", webTurnLabel(ev.web), ev, [renderWebLookup(ev.web)])
+      : turnShell("tool", "Tool · " + (ev.name || "tool"), ev, [renderCodexTool(ev)]);
     case "web_search":
-    case "web_call": return turnShell("web_call", "Web search", ev, [renderWebSearch(ev)]);
+    case "web_call": return turnShell("web_call", ev.web ? webTurnLabel(ev.web) : "Web search", ev,
+      [ev.web ? renderWebLookup(ev.web) : renderWebSearch(ev)]);
     case "branch": return renderBranch(ev);
     case "status": return renderStatus(ev);
     case "context": return renderContext(ev);
@@ -2087,6 +2090,92 @@ function renderWebSearch(ev) {
   return block;
 }
 
+// ---------- web lookups (every agent) ----------
+// web_lookup.py gives every web search / page fetch the same `web` shape,
+// whichever agent made it, so they all render here: what was asked (queries,
+// or the URL plus the question put to it), the pages that came back as links,
+// then the agent's summary or the page content.
+function safeHttpUrl(url) {
+  return typeof url === "string" && /^https?:\/\//i.test(url) ? url : "";
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (_error) { return ""; }
+}
+
+function webPageLink(p) {
+  const url = safeHttpUrl(p.url);
+  const title = p.title || url;
+  return url
+    ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer", title: url }, title)
+    : el("span", {}, title);
+}
+
+function renderWebLookup(web) {
+  const isFetch = web.kind === "fetch";
+  const queries = web.queries || [];
+  const pages = web.pages || [];
+  const summary = isFetch ? (web.url || "(no URL recorded)") : (queries[0] || (web.sites || []).join(", ") || "(no query recorded)");
+  const block = el("div", { class: "tool-block web-lookup collapsed" + (web.error ? " error" : "") });
+  const head = toggleHead(
+    block,
+    "tool-head",
+    el("span", { class: "tool-icon" }, web.error ? "✗" : "🌐"),
+    el("span", { class: "tool-name" }, isFetch ? "web fetch" : "web search"),
+    queries.length > 1 ? el("span", { class: "status-tag" }, queries.length + " queries") : null,
+    !isFetch && pages.length ? el("span", { class: "status-tag" }, pages.length + (pages.length === 1 ? " result" : " results")) : null,
+    el("span", { class: "tool-summary", title: isFetch ? summary : queries.join("  •  ") || summary }, summary)
+  );
+
+  const body = [];
+  if (isFetch) {
+    body.push(el("div", { class: "tool-section-label" }, "URL"));
+    body.push(el("div", { class: "web-url" }, pages.length ? webPageLink(pages[0]) : (web.url || "(no URL recorded)")));
+    if (web.prompt) {
+      body.push(el("div", { class: "tool-section-label" }, "Asked"));
+      body.push(el("div", { class: "attach-meta" }, web.prompt));
+    }
+    if (web.pattern) {
+      body.push(el("div", { class: "tool-section-label" }, "Looked for"));
+      body.push(el("div", { class: "attach-meta" }, web.pattern));
+    }
+  } else {
+    if (queries.length) {
+      body.push(el("div", { class: "tool-section-label" }, queries.length > 1 ? "Queries" : "Query"));
+      body.push(el("ul", { class: "query-list" }, queries.map((q) => el("li", {}, q))));
+    } else if ((web.sites || []).length) {
+      body.push(el("div", { class: "tool-section-label" }, "Sites"));
+      body.push(el("div", { class: "attach-meta" }, web.sites.join(", ")));
+    }
+    if (web.recorded !== false) {
+      body.push(el("div", { class: "tool-section-label" }, pages.length ? `Results (${pages.length})` : "Results"));
+      body.push(pages.length
+        ? el("ol", { class: "web-results" }, pages.map((p) => el("li", {},
+            webPageLink(p),
+            hostOf(p.url) && hostOf(p.url) !== p.title ? el("span", { class: "web-host" }, hostOf(p.url)) : null,
+            p.snippet ? el("div", { class: "web-snippet" }, p.snippet) : null
+          )))
+        : el("div", { class: "attach-meta" }, "(no pages returned)"));
+    }
+  }
+  if (web.text) {
+    body.push(el("div", { class: "tool-section-label" }, web.error ? "Error" : (web.text_label || "Result")));
+    body.push(el("pre", { class: "payload truncatable" + (web.error ? " result-error" : "") }, web.text));
+  } else if (isFetch && web.recorded !== false && !web.error) {
+    body.push(el("div", { class: "tool-section-label muted" }, "No content recorded"));
+  }
+  if (web.recorded === false || web.note) {
+    body.push(el("div", { class: "attach-meta web-note" },
+      web.note || "No result recorded."));
+  }
+  block.append(head, el("div", { class: "tool-body" }, ...body));
+  return block;
+}
+
+function webTurnLabel(web) {
+  return web.kind === "fetch" ? "Web fetch" : "Web search";
+}
+
 // Caller pill text, or "" to hide it. Claude Code records `caller` either as a
 // string or an object like {type:"direct"}; the normal direct/assistant call is
 // noise, so we only surface a genuinely different caller (e.g. a sub-agent).
@@ -2115,6 +2204,7 @@ function toolShell(name, isErr, headExtras, bodyKids) {
 
 // Claude Code tool (input formatted client-side; result attached on the block).
 function renderTool(b) {
+  if (b.web) return renderWebLookup(b.web);
   const name = b.name || "tool";
   const fmt = formatToolInput(name, b.input || {});
   const isErr = b.result && b.result.is_error;

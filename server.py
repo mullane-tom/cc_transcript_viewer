@@ -54,6 +54,7 @@ import export_html
 import export_markdown
 import opencode_parser as opencode
 import settings_check
+import web_lookup
 from mica import store as micastore
 
 STATIC_DIR = export_html.STATIC_DIR
@@ -453,7 +454,7 @@ def load_session(file_id: str, *, text_only: bool = False) -> dict | None:
             if text_only:
                 parse_by_id = LIGHT_SCHEME_PARSERS.get(scheme, parse_by_id)
             data = parse_by_id(file_id[len(scheme):])
-            return _apply_custom_name(data) if data is not None else None
+            return _apply_custom_name(web_lookup.annotate(data)) if data is not None else None
     target = Path(file_id).expanduser().resolve()
     if not target.exists():
         return None
@@ -473,7 +474,7 @@ def load_session(file_id: str, *, text_only: bool = False) -> dict | None:
             "original_path": record.get("path"),
             "live": record.get("status") == "active",
         }
-    return _apply_custom_name(data)
+    return _apply_custom_name(web_lookup.annotate(data))
 
 
 def resolve_transcript_file(file_id: str) -> Path:

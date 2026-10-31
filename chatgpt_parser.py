@@ -44,6 +44,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import common
+import web_lookup
 
 # Drop export zips (or extracted exports) here to have them picked up.
 DEFAULT_EXPORTS_DIR = Path.home() / ".config" / "cc_transcript_viewer" / "chatgpt"
@@ -459,10 +460,15 @@ def _search_block(meta: dict) -> dict | None:
     for group in groups:
         if group.get("domain") and group["domain"] not in domains:
             domains.append(group["domain"])
+    pages = [web_lookup.page(e.get("title"), _clean_url(e["url"]), e.get("snippet")) for e in entries]
     return {
         "type": "tool_use",
         "name": "web_search",
         "input": {"sites": domains},
+        "web": {
+            "kind": "search", "queries": [], "sites": domains, "pages": [p for p in pages if p],
+            "recorded": True, "note": "ChatGPT exports keep the pages retrieved but not the query.",
+        },
         "result": {"text": f"{len(entries)} page{'s' if len(entries) != 1 else ''} retrieved\n\n"
                            + "\n\n".join(lines), "images": []},
     }

@@ -168,6 +168,14 @@ accumulated.
       `skill`, `lsp`, `apply_patch`. opencode's camelCase arguments (`filePath`, `oldString`) are
       renamed server-side onto the same renderers, and a `task` call links straight through to the
       sub-agent session it spawned.
+  - **Web lookups, one format for every agent.** Claude Code `WebSearch`/`WebFetch`, Codex web
+    searches and page opens, Cursor `web_search`, opencode `websearch`/`webfetch`, and ChatGPT's
+    retrieved pages all render as the same 🌐 **web search** / **web fetch** block: the query (or
+    the URL and the question asked of it), the pages that came back as links with their site and
+    snippet, then the agent's summary or the page content. Codex never records results, so its
+    blocks say so instead of looking empty. The Markdown export uses the same layout
+    (`### Web search: <query>`, `#### Results (N)` as a link list, `#### Summary`). The mapping lives
+    in `web_lookup.py`.
   - **Copy all text** copies user/assistant messages, reasoning, and tool calls (including diffs),
     but skips tool results and system/notice noise.
   - Codex task/context/token bookkeeping consolidated into one **Turn metadata** disclosure at the
@@ -568,6 +576,7 @@ reported.
 | `codex_export/opencode_to_codex.py` | Exports opencode sessions as Codex rollout JSONL, carrying the provider's encrypted reasoning (`reasoning.encrypted` → `encrypted_content`) and splitting opencode's fused tool record into Codex's separate `function_call` / `function_call_output`. Records the provider's reasoning `format` so a non-OpenAI blob isn't mistaken for a replayable one. |
 | `codex_export/codex_rollout.py` | The parts of writing a Codex rollout that aren't specific to any source — record shape, `rollout-<time>-<id>.jsonl` naming, dated output layout — shared by both exporters so they can't drift. |
 | `chatgpt_parser.py` | ChatGPT data-export parsing library: finds exports (zip, extracted directory, or a directory of them), reads the conversation shards in place, walks each conversation tree from `current_node`, folds assistant/tool messages into block-shaped turns, cleans citation markers, and inlines images from the archive on open. Sessions are addressed as `chatgpt:<conversationId>`. Call `configure(paths)` to retarget. |
+| `web_lookup.py` | Maps every source's web searches and page fetches onto one `web` record (kind, queries or URL and prompt, result pages, summary/content, whether results were recorded) that the server adds to each loaded session, so the frontend and Markdown export render them one way. |
 | `export_markdown.py` | Renders any parsed session as structured Markdown for `/api/export-markdown`, and as a command-line bulk exporter (`--chatgpt-export` converts a whole export, with an `INDEX.md`). |
 | `export_html.py` | Bundles one parsed session into a self-contained HTML file for `/api/export`: inlines `static/style.css` and `static/app.js` into `static/index.html`, embeds the session as a JSON literal, and re-embeds locally-referenced images as `data:` URIs under a per-image and whole-file size budget. Deliberately has no renderer of its own — the saved page runs the same `app.js`, which detects the embedded payload and switches to standalone mode. |
 | `mica/` | The optional [Mica](#optional-tamper-resistant-backups-mica): `capture.py` (the polling daemon that copies appends into append-only, hash-chained generations and records tamper events), `store.py` (the on-disk format and the read-only `StoreReader` the viewer uses to badge sessions, list deleted ones, and compare a live file with its capture), `install.py` (macOS `_mica` user, root-owned install, ACLs, LaunchDaemon), and `__main__.py` (`python3 -m mica daemon/status/flagged/verify/install/uninstall`). Standard library only, Python 3.9-compatible so it runs on Apple's root-owned interpreter. |

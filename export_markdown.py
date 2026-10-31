@@ -191,8 +191,40 @@ class _Writer:
             elif btype == "image":
                 label = b.get("name") or b.get("media_type") or "image"
                 self.out.append(f"*[image: {label}]*")
+            elif btype == "tool_use" and b.get("web"):
+                self.web(b["web"])
             elif btype == "tool_use":
                 self.tool(b.get("name"), b.get("input"), b.get("result"), child_file=b.get("child_file") or "")
+
+    def web(self, web: dict) -> None:
+        """A web search or fetch, in one layout whichever agent made it
+        (see web_lookup.py): what was asked, the pages, then the text."""
+        fetch = web.get("kind") == "fetch"
+        queries = [q for q in web.get("queries") or [] if q]
+        if fetch:
+            self.h(3, "Web fetch: " + (web.get("url") or "(no URL recorded)"))
+        else:
+            label = queries[0] if len(queries) == 1 else ", ".join(web.get("sites") or []) if not queries else ""
+            self.h(3, "Web search" + (": " + label if label else ""))
+            if len(queries) > 1:
+                self.out.append("\n".join(f"- {q}" for q in queries))
+        if web.get("prompt"):
+            self.out.append(quote("**Asked:** " + web["prompt"]))
+        if web.get("pattern"):
+            self.out.append(quote("**Looked for:** " + web["pattern"]))
+        pages = web.get("pages") or []
+        if not fetch and web.get("recorded") is not False:
+            self.h(4, f"Results ({len(pages)})")
+            lines = []
+            for page in pages:
+                title = (page.get("title") or page["url"]).replace("]", "")
+                lines.append(f"- [{title}]({page['url']})" + (f" — {page['snippet']}" if page.get("snippet") else ""))
+            self.out.append("\n".join(lines) or "*(no pages returned)*")
+        if web.get("text"):
+            self.h(4, "Error" if web.get("error") else (web.get("text_label") or "Result"))
+            self.out.append(fence(_truncate(web["text"], self.max_result_chars), "text"))
+        if web.get("recorded") is False or web.get("note"):
+            self.out.append("*" + (web.get("note") or "No result recorded.") + "*")
 
     # -- events ---------------------------------------------------------------
     def event(self, ev: dict, session_model: str) -> None:
@@ -218,6 +250,9 @@ class _Writer:
         elif kind == "reasoning":
             self.section("assistant", "Assistant", ev, session_model)
             self.thinking(ev.get("text") or "", bool(ev.get("has_encrypted")), "Reasoning")
+        elif kind in ("tool", "web_search", "web_call") and ev.get("web"):
+            self.section("assistant", "Assistant", ev, session_model)
+            self.web(ev["web"])
         elif kind == "tool":
             self.section("assistant", "Assistant", ev, session_model)
             self.tool(ev.get("name"), ev.get("input"), ev.get("result"))
