@@ -430,9 +430,16 @@ What the parser does with the export (`chatgpt_parser.py`):
   messages addressed to a tool (`python`, `web`, `dalle.text2im`, …) become tool calls, and the
   following `tool` message becomes their result. "Thought for N seconds" recaps and hidden system
   messages are dropped; custom instructions show as an instructions card.
+- Keeps web lookups. The pages a lookup retrieved (`search_result_groups`) become a `web_search`
+  tool call ahead of the reply, listing each page's title, URL, and snippet (the export keeps
+  results but not queries, so the input lists the sites searched). After the reply, a **Sources**
+  list names every page it cited: ChatGPT's own source footnote first, then any other cited page.
 - Rewrites ChatGPT's inline citation markers (`\ue200cite\ue202turn0search3\ue201`, or `【6†source】`
-  in older exports) into Markdown links when the message's `content_references` name a URL, and
-  into their display text (or nothing) otherwise.
+  in older exports) into Markdown links. Current exports leave each reference's `matched_text`
+  empty, so a marker is joined to its page through the cited item's `refs`
+  (`turn_index`/`ref_type`/`ref_index` → `turn0search3`); references are not in marker order, so
+  a marker with no such link is dropped (its page is still in the Sources list). Other markers
+  become their display text, and attribution highlights are removed.
 - Shows uploaded and generated images by reading the `file-….dat` members out of the zip when a
   conversation is opened. Search and the Markdown export skip them (an `*[image: name]*` note
   stands in).
